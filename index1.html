@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice Reconciliation Tool</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; padding: 40px; background: #f0f2f5; color: #333; }
+        .container { max-width: 650px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        h2 { color: #1a73e8; text-align: center; margin-bottom: 30px; }
+        
+        .upload-card { 
+            border: 2px dashed #cbd5e0; 
+            padding: 20px; 
+            border-radius: 10px; 
+            margin-bottom: 20px; 
+            transition: 0.3s;
+            position: relative;
+        }
+        .upload-card.loaded { border-color: #48bb78; background: #f0fff4; }
+        
+        label { display: block; font-weight: bold; margin-bottom: 10px; color: #4a5568; }
+        input[type="file"] { width: 100%; cursor: pointer; }
+
+        button { 
+            background: #1a73e8; color: white; border: none; padding: 16px; 
+            border-radius: 8px; cursor: pointer; width: 100%; font-size: 16px; 
+            font-weight: bold; margin-top: 10px; transition: 0.2s;
+        }
+        button:hover { background: #1557b0; transform: translateY(-1px); }
+        
+        #status { 
+            margin-top: 20px; padding: 15px; border-radius: 8px; 
+            text-align: center; font-weight: 500; display: none;
+        }
+        .error { background: #fed7d7; color: #c53030; }
+        .success { background: #c6f6d5; color: #2f855a; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Invoice Recon Tool</h2>
+
+    <div class="upload-card" id="card1">
+        <label>Step 1: Upload Customer Data (Missing Invoices)</label>
+        <input type="file" id="customerFile" accept=".csv, .xlsx" onchange="markLoaded('card1')">
+    </div>
+
+    <div class="upload-card" id="card2">
+        <label>Step 2: Upload System Export (Latest Statements)</label>
+        <input type="file" id="systemFile" accept=".csv, .xlsx" onchange="markLoaded('card2')">
+    </div>
+
+    <button id="processBtn">Generate Reconciliation Report</button>
+    
+    <div id="status"></div>
+</div>
+
+<script>
+    // Visual feedback when file is selected
+    function markLoaded(id) {
+        document.getElementById(id).classList.add('loaded');
+    }
+
+    document.getElementById('processBtn').addEventListener('click', async () => {
+        const custFile = document.getElementById('customerFile').files[0];
+        const sysFile = document.getElementById('systemFile').files[0];
+        const statusDiv = document.getElementById('status');
+
+        if (!custFile || !sysFile) {
+            statusDiv.style.display = 'block';
+            statusDiv.className = 'error';
+            statusDiv.innerText = "Please upload both files to proceed.";
+            return;
+        }
+
+        statusDiv.style.display = 'block';
+        statusDiv.className = '';
+        statusDiv.style.background = '#ebf8ff';
+        statusDiv.innerText = "Processing labels and matching dates...";
+
+        try {
+            const custData = await readExcel(custFile);
+            const sysData = await readExcel(sysFile);
+
+            // 1. Map System Data for quick lookup
+            const systemLookup = {};
+            sysData.forEach(row => {
+                const id = cleanID(row["Account ID"]);
+                if (id) {
+                    systemLookup[id] = {
+                        latestDate: row["Statement Latest Date"] ? new Date(row["Statement Latest Date"]) : null,
+                        status: row["Status"] || "unknown",
+                        credId: formatUUID(row["Credential ID"] || "")
+                    };
+                }
+            });
+
+            // 2. Compare against Customer Data
+            const report = custData.map(row => {
+                const id = cleanID(row["Account ID (Without Prefix)"] || row["Account ID"]);
+                const custDate = row["Invoice Date"] ? new Date(row["Invoice Date"]) : null;
+                const match = systemLookup[id];
+
+                let verdict = "Not Found";
+                let sysDateStr = "N/A";
+                let credId = "N/A";
+                let accStatus = "N/A";
+
+                if (match) {
+                    credId = match.credId;
+                    accStatus = match.status;
+                    sysDateStr = match.latestDate ? match.latestDate.toISOString().split('T')[0] : "Missing Date";
+                    
+                    if (match.latestDate && custDate) {
+                        verdict = (match.latestDate >= custDate) ? "Fetched" : "Not Fetched (System Date is Older)";
+                    }
+                }
+
+                return {
+                    "Account ID": id,
+                    "Credential ID": credId,
+                    "Provider": row["Provider Name"] || "N/A",
+                    "Customer Requested Date": custDate ? custDate.toISOString().split('T')[0] : "Invalid Date",
+                    "System Latest Date": sysDateStr,
+                    "Status (ok/off)": accStatus,
+                    "Final Verdict": verdict
+                };
+            });
+
+            // 3. Export to Excel
+            const ws = XLSX.utils.json_to_sheet(report);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Reconciliation");
+            XLSX.writeFile(wb, "Final_Invoice_Report.xlsx");
+
+            statusDiv.className = 'success';
+            statusDiv.innerText = "Success! Report downloaded.";
+
+        } catch (err) {
+            console.error(err);
+            statusDiv.className = 'error';
+            statusDiv.innerText = "Error reading files. Check column headers.";
+        }
+    });
+
+    function readExcel(file) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const workbook = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+                resolve(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "" }));
+            };
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    function cleanID(val) {
+        return val ? val.toString().replace('act_', '').trim().toLowerCase() : null;
+    }
+
+    function formatUUID(str) {
+        let s = str.toString().replace(/[^a-fA-F0-9]/g, '');
+        return (s.length === 32) ? `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}` : str;
+    }
+</script>
+
+</body>
+</html>
